@@ -230,6 +230,17 @@ function buildMobileConfig(der: Buffer): string {
 </plist>`;
 }
 
+// CA 的 SHA-256 指纹，用于和手机上已安装的证书比对
+function caFingerprint(): string {
+  const hex = crypto
+    .createHash("sha256")
+    .update(getCADer())
+    .digest("hex")
+    .toUpperCase();
+
+  return hex.replace(/(..)(?!$)/g, "$1:");
+}
+
 function serveCA(
   pathname: string,
   req: http.IncomingMessage & { headers: Record<string, string> },
@@ -282,10 +293,13 @@ function serveCA(
   a{display:inline-block;margin:6px 0;padding:10px 16px;background:#0a84ff;color:#fff;border-radius:8px;text-decoration:none}
   code{background:#f2f2f7;padding:1px 5px;border-radius:4px}
   li{margin:4px 0}
+  .fp{font-size:13px;color:#555;word-break:break-all}
 </style>
 <h1>安装本地代理 CA</h1>
 <p>手机必须安装并<strong>信任</strong>这张根证书，代理才能解密 HTTPS，否则会出现
 <code>TLS alert certificate unknown</code>。</p>
+<p class="fp">SHA-256 指纹：<code>${caFingerprint()}</code><br>
+装完后在手机的「信任的凭据」里点开该证书比对指纹；不一致说明装的是别的或旧的 CA。</p>
 
 <h2>iPhone / iPad</h2>
 <ol>
@@ -299,6 +313,7 @@ function serveCA(
   <li><a href="/__ca/ca.cer">下载证书</a></li>
   <li>设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书</li>
   <li>Android 7 起 App 默认不信任用户证书，仅浏览器等部分场景生效</li>
+  <li>要让 App 也信任，需 root 后把证书装进系统证书库，或改用可 root 的模拟器（见 README 方案 A）</li>
 </ol>
 
 <h2>其他设备</h2>
