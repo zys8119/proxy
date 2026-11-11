@@ -5,10 +5,11 @@ import zlib from "node:zlib";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import crypto from "node:crypto";
 import { URL } from "node:url";
 import { execFileSync, execSync } from "node:child_process";
 
-const PORT = 8080;
+const PORT = Number(process.env.PORT) || 8080;
 
 // ==========================
 // 证书管理（HTTPS 中间人拦截）
@@ -125,6 +126,142 @@ function ensureCATrusted() {
   );
 }
 
+// ==========================
+// CA 下载页（手机等设备安装用）
+// ==========================
+function getCADer(): Buffer {
+  const pem = fs.readFileSync(CA_CERT, "utf8");
+  return Buffer.from(
+    pem.replace(/-----[^-]+-----/g, "").replace(/\s+/g, ""),
+    "base64",
+  );
+}
+
+// 由证书内容派生固定 UUID，保证同一张 CA 重复安装时是同一个描述文件
+function caUUID(salt: string): string {
+  const h = crypto
+    .createHash("sha1")
+    .update(getCADer())
+    .update(salt)
+    .digest("hex");
+
+  return `${h.slice(0, 8)}-${h.slice(8, 12)}-4${h.slice(13, 16)}-a${h.slice(
+    17,
+    20,
+  )}-${h.slice(20, 32)}`.toUpperCase();
+}
+
+// iOS 只能通过描述文件 (.mobileconfig) 安装根证书
+function buildMobileConfig(der: Buffer): string {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>PayloadContent</key>
+  <array>
+    <dict>
+      <key>PayloadCertificateFileName</key>
+      <string>LocalProxyCA.cer</string>
+      <key>PayloadContent</key>
+      <data>${der.toString("base64")}</data>
+      <key>PayloadDescription</key>
+      <string>本地代理根证书（用于 HTTPS 解密）</string>
+      <key>PayloadDisplayName</key>
+      <string>Local Proxy CA</string>
+      <key>PayloadIdentifier</key>
+      <string>local.proxy.ca</string>
+      <key>PayloadType</key>
+      <string>com.apple.security.root</string>
+      <key>PayloadUUID</key>
+      <string>${caUUID("cert")}</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+    </dict>
+  </array>
+  <key>PayloadDisplayName</key>
+  <string>Local Proxy CA</string>
+  <key>PayloadIdentifier</key>
+  <string>local.proxy.ca.profile</string>
+  <key>PayloadOrganization</key>
+  <string>Local Proxy</string>
+  <key>PayloadRemovalDisallowed</key>
+  <false/>
+  <key>PayloadType</key>
+  <string>Configuration</string>
+  <key>PayloadUUID</key>
+  <string>${caUUID("profile")}</string>
+  <key>PayloadVersion</key>
+  <integer>1</integer>
+</dict>
+</plist>`;
+}
+
+function serveCA(pathname: string, res: http.ServerResponse) {
+  if (pathname === "/__ca/ca.mobileconfig") {
+    const body = Buffer.from(buildMobileConfig(getCADer()), "utf8");
+
+    res.writeHead(200, {
+      "content-type": "application/x-apple-aspen-config",
+      "content-disposition": 'attachment; filename="LocalProxyCA.mobileconfig"',
+      "content-length": body.length,
+    });
+    return res.end(body);
+  }
+
+  if (pathname === "/__ca/ca.crt" || pathname === "/__ca/ca.cer") {
+    const pem = pathname.endsWith(".crt");
+    const body = pem ? fs.readFileSync(CA_CERT) : getCADer();
+
+    res.writeHead(200, {
+      "content-type": "application/x-x509-ca-cert",
+      "content-disposition": `attachment; filename="LocalProxyCA.${
+        pem ? "crt" : "cer"
+      }"`,
+      "content-length": body.length,
+    });
+    return res.end(body);
+  }
+
+  const html = `<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>安装本地代理 CA</title>
+<style>
+  body{font:16px/1.6 -apple-system,system-ui,sans-serif;margin:24px;max-width:640px;color:#222}
+  a{display:inline-block;margin:6px 0;padding:10px 16px;background:#0a84ff;color:#fff;border-radius:8px;text-decoration:none}
+  code{background:#f2f2f7;padding:1px 5px;border-radius:4px}
+  li{margin:4px 0}
+</style>
+<h1>安装本地代理 CA</h1>
+<p>手机必须安装并<strong>信任</strong>这张根证书，代理才能解密 HTTPS，否则会出现
+<code>TLS alert certificate unknown</code>。</p>
+
+<h2>iPhone / iPad</h2>
+<ol>
+  <li><a href="/__ca/ca.mobileconfig">下载描述文件</a></li>
+  <li>设置 → 通用 → VPN 与设备管理 → 安装该描述文件</li>
+  <li>设置 → 通用 → 关于本机 → 证书信任设置 → 打开 “Local Proxy CA”</li>
+</ol>
+
+<h2>Android</h2>
+<ol>
+  <li><a href="/__ca/ca.cer">下载证书</a></li>
+  <li>设置 → 安全 → 加密与凭据 → 安装证书 → CA 证书</li>
+  <li>Android 7 起 App 默认不信任用户证书，仅浏览器等部分场景生效</li>
+</ol>
+
+<h2>其他设备</h2>
+<p><a href="/__ca/ca.crt">下载 ca.crt（PEM）</a></p>
+</html>`;
+
+  res.writeHead(200, {
+    "content-type": "text/html; charset=utf-8",
+    "content-length": Buffer.byteLength(html),
+  });
+  res.end(html);
+}
+
 // 解压 gzip / deflate / br 响应体
 function decodeBody(buffer: Buffer, headers: Record<string, any>): Buffer {
   const encoding = String(headers["content-encoding"] || "").toLowerCase();
@@ -176,6 +313,16 @@ async function handleRequest(
   try {
     // HTTPS 经 MITM 解密后，req.url 只有路径，需要结合 Host 头还原完整地址
     const rawUrl = req.url || "/";
+
+    // 内置 CA 下载页：手机浏览器直接访问代理地址即可安装证书
+    const reqPath = rawUrl
+      .replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, "")
+      .split("?")[0];
+
+    if (reqPath === "/__ca" || reqPath.startsWith("/__ca/")) {
+      return serveCA(reqPath, res);
+    }
+
     const isTls = Boolean((req.socket as any).encrypted);
     const protocol = isTls ? "https:" : "http:";
 
@@ -380,12 +527,22 @@ server.on("connect", (req, clientSocket, head) => {
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`Proxy listening on http://0.0.0.0:${PORT}`);
-  console.log(
-    execSync(`x ip | awk '{print $3}'`)
-      .toString()
-      .split("\n")
-      .filter((e: any) => /^192/.test(e))
-      .map((e: any) => `Proxy listening on http://${e.trim()}:${PORT}`)
-      .join("\n"),
-  );
+
+  const lanIps = Object.values(os.networkInterfaces())
+    .flat()
+    .filter((info) => info?.family === "IPv4" && !info.internal)
+    .map((info) => info!.address);
+
+  for (const ip of lanIps) {
+    console.log(`Proxy listening on http://${ip}:${PORT}`);
+    console.log(`手机安装 CA（浏览器打开）: http://${ip}:${PORT}/__ca`);
+  }
+  try {
+    execFileSync(`x qr  http://${lanIps[0]}:${PORT}/__ca`, {
+      stdio: "inherit",
+      shell: true,
+    });
+  } catch (error: any) {
+    /// 忽略错误
+  }
 });
