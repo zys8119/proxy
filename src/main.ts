@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { URL } from "node:url";
-import { execSync } from "node:child_process";
+import { execFileSync, execSync } from "node:child_process";
 
 const PORT = 8080;
 
@@ -75,43 +75,54 @@ function getCertPair(hostname: string): { key: string; cert: string } {
   return pair;
 }
 
-// 检查本地 CA 是否已被系统信任
+// 检查本地 CA 是否已被系统信任（按证书本身校验，而不是只看钥匙串里有没有同名证书）
 function isCATrusted(): boolean {
-  if (process.platform !== "darwin") return false;
+  if (process.platform !== "darwin" || !fs.existsSync(CA_CERT)) return false;
 
-  for (const keychain of [
-    LOGIN_KEYCHAIN,
-    "/Library/Keychains/System.keychain",
-  ]) {
-    try {
-      const output = execSync(
-        `security find-certificate -c "Local Proxy CA" -a "${keychain}"`,
-        { encoding: "utf8", stdio: "pipe" },
-      );
-      if (output.trim().length > 0) return true;
-    } catch {}
+  try {
+    execFileSync("security", ["verify-cert", "-c", CA_CERT, "-p", "ssl"], {
+      stdio: "pipe",
+    });
+    return true;
+  } catch {
+    return false;
   }
-
-  return false;
 }
 
-// 未信任时自动写入当前用户钥匙串（无需 sudo）
+// 未信任时自动把 CA 安装到系统钥匙串并设为信任根（会弹一次系统管理员授权）
 function ensureCATrusted() {
   if (process.platform !== "darwin" || isCATrusted()) return;
 
+  const SYSTEM_KEYCHAIN = "/Library/Keychains/System.keychain";
+
+  // 1. 优先装到系统钥匙串，对所有用户和所有 App 生效
   try {
-    execSync(
-      `security add-trusted-cert -r trustRoot -k "${LOGIN_KEYCHAIN}" "${CA_CERT}"`,
+    const script =
+      `do shell script "security add-trusted-cert -d -r trustRoot ` +
+      `-k ${SYSTEM_KEYCHAIN} " & quoted form of ${JSON.stringify(CA_CERT)} ` +
+      `with administrator privileges`;
+
+    execFileSync("osascript", ["-e", script], { stdio: "pipe" });
+    console.log("已将本地 CA 安装到系统钥匙串并设为信任根，HTTPS 可直接解密");
+    return;
+  } catch {}
+
+  // 2. 系统钥匙串安装被取消或失败时，退回当前用户的登录钥匙串
+  try {
+    execFileSync(
+      "security",
+      ["add-trusted-cert", "-r", "trustRoot", "-k", LOGIN_KEYCHAIN, CA_CERT],
       { stdio: "pipe" },
     );
     console.log("已将本地 CA 加入登录钥匙串信任，HTTPS 可直接解密");
-  } catch {
-    console.warn(
-      "\n本地 CA 尚未被系统信任，请执行一次：\n" +
-        `  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "${CA_CERT}"\n` +
-        `临时使用（不安装证书）可加参数：curl --cacert "${CA_CERT}" ...\n`,
-    );
-  }
+    return;
+  } catch {}
+
+  console.warn(
+    "\n本地 CA 尚未被系统信任，请执行一次：\n" +
+      `  sudo security add-trusted-cert -d -r trustRoot -k ${SYSTEM_KEYCHAIN} "${CA_CERT}"\n` +
+      `临时使用（不安装证书）可加参数：curl --cacert "${CA_CERT}" ...\n`,
+  );
 }
 
 // 解压 gzip / deflate / br 响应体

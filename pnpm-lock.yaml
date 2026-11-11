@@ -197,6 +197,9 @@ importers:
 
   .:
     devDependencies:
+      '@types/node':
+        specifier: ^26.6.6
+        version: 26.6.6
       tsx:
         specifier: ^4.23.15
         version: 4.23.15
@@ -359,6 +362,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
+  '@types/node@26.6.6':
+    resolution: {integrity: sha512-MzQj+8Kx3XI40OmUAE6Qoh58ZMNstNNMwn2nfd3qWsfe7nDNSqJNzes4njhz6AHwrSHOffSLwXU6yb474Q4aog==}
+
   esbuild@0.28.2:
     resolution: {integrity: sha512-HKVLS8dvII+xoKW9kmqxbRKrnWEXfJJr/FZhhJmiqIB0e053QNYFqOBouTMO/k5sID4MvCiUCvv8b9M4h32wIA==}
     engines: {node: '>=18'}
@@ -373,6 +379,9 @@ packages:
     resolution: {integrity: sha512-Yiex1Ovn8z2xPpOWckIiysV1SSyRMY9BkLF++q0yKiDxCqRhosKfMg3janKkiLBwZ5c/YryloKwGZcrEmtwxKw==}
     engines: {node: '>=18.0.0'}
     hasBin: true
+
+  undici-types@8.9.0:
+    resolution: {integrity: sha512-KTDyRTYX8sWmKXAikPHHSyc63CRPETMctyjKFupcC6OBLXT3xsN0e9aF7m+mIXutFWpUXuedtowG7iLOzp0kQg==}
 
 snapshots:
 
@@ -454,6 +463,10 @@ snapshots:
   '@esbuild/win32-x64@0.28.2':
     optional: true
 
+  '@types/node@26.6.6':
+    dependencies:
+      undici-types: 8.9.0
+
   esbuild@0.28.2:
     optionalDependencies:
       '@esbuild/aix-ppc64': 0.28.2
@@ -491,3 +504,5 @@ snapshots:
       esbuild: 0.28.2
     optionalDependencies:
       fsevents: 2.3.3
+
+  undici-types@8.9.0: {}
