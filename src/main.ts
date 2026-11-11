@@ -38,6 +38,40 @@ function ensureCA() {
 
 const certCache = new Map<string, { key: string; cert: string }>();
 
+// 叶子证书扩展版本：内容变更时自动重建旧缓存
+const HOST_EXT_VERSION = "2";
+const HOST_EXT_MARKER = path.join(HOST_DIR, ".ext-version");
+
+// iOS 要求 TLS 服务器证书必须带 EKU serverAuth 和 SAN，否则直接拒绝握手
+function hostCertExt(hostname: string): string {
+  return [
+    "basicConstraints=critical,CA:FALSE",
+    "keyUsage=critical,digitalSignature,keyEncipherment",
+    "extendedKeyUsage=serverAuth",
+    `subjectAltName=DNS:${hostname}`,
+    "",
+  ].join("\n");
+}
+
+// 扩展格式升级后清空旧缓存，保证新签发的证书格式一致
+function ensureHostCertFormat() {
+  fs.mkdirSync(HOST_DIR, { recursive: true });
+
+  if (
+    fs.existsSync(HOST_EXT_MARKER) &&
+    fs.readFileSync(HOST_EXT_MARKER, "utf8").trim() === HOST_EXT_VERSION
+  ) {
+    return;
+  }
+
+  for (const file of fs.readdirSync(HOST_DIR)) {
+    if (file === ".ext-version") continue;
+    fs.rmSync(path.join(HOST_DIR, file), { force: true });
+  }
+
+  fs.writeFileSync(HOST_EXT_MARKER, HOST_EXT_VERSION);
+}
+
 // 为每个域名签发一张由本地 CA 签名的证书（磁盘缓存）
 function getCertPair(hostname: string): { key: string; cert: string } {
   const cached = certCache.get(hostname);
@@ -53,7 +87,7 @@ function getCertPair(hostname: string): { key: string; cert: string } {
     const csrPath = path.join(HOST_DIR, `${safeName}.csr`);
     const extPath = path.join(HOST_DIR, `${safeName}.ext`);
 
-    fs.writeFileSync(extPath, `subjectAltName=DNS:${hostname}\n`);
+    fs.writeFileSync(extPath, hostCertExt(hostname));
 
     execSync(
       `openssl req -new -newkey rsa:2048 -nodes ` +
@@ -196,7 +230,23 @@ function buildMobileConfig(der: Buffer): string {
 </plist>`;
 }
 
-function serveCA(pathname: string, res: http.ServerResponse) {
+function serveCA(
+  pathname: string,
+  req: http.IncomingMessage & { headers: Record<string, string> },
+  res: http.ServerResponse,
+) {
+  // 记录是谁来下载证书，便于确认手机是否真的访问过安装页
+  const clientIp = String(req.socket.remoteAddress || "").replace(
+    /^::ffff:/,
+    "",
+  );
+
+  console.log(
+    `[CA] ${pathname} <- ${clientIp} UA=${String(
+      req.headers["user-agent"] || "-",
+    )}`,
+  );
+
   if (pathname === "/__ca/ca.mobileconfig") {
     const body = Buffer.from(buildMobileConfig(getCADer()), "utf8");
 
@@ -320,7 +370,7 @@ async function handleRequest(
       .split("?")[0];
 
     if (reqPath === "/__ca" || reqPath.startsWith("/__ca/")) {
-      return serveCA(reqPath, res);
+      return serveCA(reqPath, req, res);
     }
 
     const isTls = Boolean((req.socket as any).encrypted);
@@ -482,6 +532,7 @@ async function handleRequest(
 }
 
 ensureCA();
+ensureHostCertFormat();
 ensureCATrusted();
 
 // MITM 服务器：接收 CONNECT 后的原始连接，完成 TLS 握手并按 SNI 动态签发证书
@@ -504,6 +555,17 @@ const mitmServer = https.createServer(
 
 mitmServer.on("tlsClientError", (error: Error, socket: any) => {
   console.error("TLS 握手失败:", error.message);
+
+  if (error.message.includes("certificate unknown")) {
+    const ip = Object.values(os.networkInterfaces())
+      .flat()
+      .find((info) => info?.family === "IPv4" && !info.internal)?.address;
+
+    console.error(
+      `客户端不信任本地 CA，请在该设备浏览器打开 http://${ip}:${PORT}/__ca 安装并信任证书`,
+    );
+  }
+
   socket.destroy();
 });
 
@@ -515,6 +577,10 @@ server.on("connect", (req, clientSocket, head) => {
 
   console.log("\n========== CONNECT ==========");
   console.log("Target:", `${hostname}:${port}`);
+  console.log(
+    "Client:",
+    String((clientSocket as any).remoteAddress || "").replace(/^::ffff:/, ""),
+  );
 
   clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
 
